@@ -21,18 +21,20 @@ http://www.tokbox.com/
 
 =head1 VERSION
 
-Version 0.02
+Version 0.03
 
 =cut
 
-our $VERSION = '0.02';
-our $API_VERSION = 'tbpl-v0.01.2011-06-15';
-our %API_SERVER = ( "development" => "https://staging.tokbox.com/hl",
-                    "production" => "https://api.opentok.com/hl");
+our $VERSION = '0.03';
+our $API_VERSION = 'tbpl-v0.03.2013-07-10';
+our %API_SERVER = ( 
+    "development" => "https://staging.tokbox.com/hl",
+    "production"  => "https://api.opentok.com/hl"
+);
 our %RoleConstants = (
-                    "SUBSCRIBER" => "subscriber",
-                    "PUBLISHER" => "publisher",
-                    "MODERATOR" => "moderator",
+    "SUBSCRIBER" => "subscriber",
+    "PUBLISHER"  => "publisher",
+    "MODERATOR"  => "moderator",
 );
 
 =head1 SYNOPSIS
@@ -41,17 +43,46 @@ our %RoleConstants = (
 
     use OpenTok::API;
     
-    # Get your own API-keys from http://www.tokbox.com/opentok/api/tools/js/apikey
-    my $ot = OpenTok::API->new('api_key' => '1127', 'api_secret' => '123456789sosecretcode123123123');
+    # Get your own API-keys from http://www.tokbox.com/opentok
+    my $ot = OpenTok::API->new(
+        'api_key'    => $api_key, 
+        'api_secret' => $api_secret,
+        'mode'       => "development"|"production",
+    );
     
-    print $ot->generate_token()."\n";
-    ...
-
 2. Create new session
 
-    print $ot->create_session('location' => '127.0.0.1')->getSessionId();
+    my $session_id = $ot->create_session( 
+        location => '', 
+        'p2p.preference' => "enabled"|"disabled" 
+    )->getSessionId();
     
+3. Generate a new token for session
     
+    my $token = $ot->generate_token(
+        session_id => $session_id, 
+        role => "publisher"|"subscriber"|"moderator" 
+    );
+
+4. Now insert your $api_key, $session_id, and $token into your template using your favourite templating engine
+
+    # TT example 
+
+    # In server side code
+    my $tt = Template->new(...});
+    my $vars = { api_key => $api_key, session_id => $session_id, token => $token };
+    $tt->process($template, $vars) || die $tt->error(), "\n";
+
+    # In HTML (javascript part)
+    var apiKey    = "[% api_key %]";
+    var sessionId = "[% session_id %]";
+    var token     = "[% token %]";
+    ...
+    var session = TB.initSession(sessionId);
+    session.addEventListener("sessionConnected", sessionConnectedHandler);
+    session.addEventListener("streamCreated", streamCreatedHandler);
+    session.connect(apiKey,token);
+
 
 =head1 SUBROUTINES/METHODS
 
@@ -59,7 +90,11 @@ our %RoleConstants = (
 
 Creates and returns a new OpenTok::API object
 
-    my $ot = OpenTok::API->new('api_key' => '1127', 'api_secret' => '123456789sosecretcode123123123');
+    my $ot = OpenTok::API->new(
+        'api_key'    => $api_key, 
+        'api_secret' => $api_secret,
+        'mode'       => "development"|"production",
+    );
 
 =over 4
 
@@ -96,7 +131,11 @@ sub new {
 
 Generates a token for specific session.
 
-    $ot->generate_token(session_id => '153975e9d3ecce1d11baddd2c9d8d3c9d147df18', role => 'moderator' );
+    my $token = $ot->generate_token(
+        session_id => $session_id, 
+        role => "publisher"|"subscriber"|"moderator",
+        expire_time => (time()+24*3600),
+    );
 
 =over 4
 
@@ -113,7 +152,7 @@ http://www.tokbox.com/opentok/api/tools/as3/documentation/overview/token_creatio
 
 Optional. The time when the token will expire, defined as an integer value for a Unix timestamp (in seconds).
 If you do not specify this value, tokens expire in 24 hours after being created.
-The expiration_time value, if specified, must be within seven days of the creation time.
+The expiration_time value, if specified, must be within 30 days of the creation time.
 
 =back
 
@@ -121,27 +160,22 @@ The expiration_time value, if specified, must be within seven days of the creati
 
 sub generate_token {
     my $self = shift;
+    my $create_time = time();
     my %arg = (
         session_id => '',
         role => $RoleConstants{PUBLISHER},
-        expire_time => undef,
+        expire_time => ($create_time +24*3600),
         @_,        
     );
-    
-    my $create_time = time();
-    my $nonce = Time::HiRes::time . rand(2147483647);
-    
-    my $query_string = "session_id=".$arg{session_id}."&create_time=".$create_time."&role=".$arg{role}."&nonce=".$nonce;
-    
-    $query_string .= "&expire_time=${arg{expire_time}}" if ($arg{expire_time});
-    
-    my $signature = $self->_sign_string($query_string, $self->{api_secret});
-    
-    my $api_key = $self->{api_key};
-    
-    my $sdk_version = $API_VERSION;
-    
-    return "T1==" . encode_base64("partner_id=$api_key&sdk_version=$sdk_version&sig=$signature:$query_string",'');
+    my $nonce = rand();
+    my $query_string = "role=" . $arg{role} .
+                       "&session_id=" . $arg{session_id} .
+                       "&create_time=" . $create_time .
+                       "&nonce=" . $nonce .
+                       "&expire_time=" . $arg{expire_time} .
+                       "&connection_data=";
+    my $signature = hmac_sha1_hex($query_string, $self->{api_secret});
+    return "T1==" . encode_base64("partner_id=".$self->{api_key}."&sdk_version=$API_VERSION&sig=$signature:$query_string",'');
      
 }
 
@@ -149,40 +183,39 @@ sub generate_token {
 
 Creates and returns OpenTok::API::Session object
 
-    $ot->create_session(location => $ENV{'REMOTE_ADDR'});
+    my $session_id = $ot->create_session( 
+        location => '', 
+        'p2p.preference' => "enabled"|"disabled" 
+    )->getSessionId();
 
 =over 4
 
 =item * C<< location => string >>
 
-An IP address that TokBox will use to situate the session in its global network.
-Ideally, this IP address should be representative of the geographical locations of the participants in the session.
-If you have access to the IP address of the first participant in the session, use that address.
+An IP address that TokBox will use to situate the session in its global network. 
+In general, you should not specify a location hint; if no location hint is specified,
+the session uses a media server based on the location of the first client connecting to the session. 
+Specify a location hint only if you know the general geographic region (and a representative IP address) 
+for the session and you think the first client connecting may not be in that region.
 
-=item * C<< echoSuppression_enabled => [0|1] >>
+=item * C<<  'p2p.preference' => 'enabled' >>
 
-Whether echo suppression is initially enabled for multiplexed streams. The default value is 0.
+The properties option includes any following key value pairs. Currently only the following property exists:
 
-=item * C<< multiplexer_numOutputStreams => int >>
+p2p.preference (String) . Whether the session's streams will be transmitted directly between peers. You can set the following possible values:
 
-The number of multiplexed streams automatically created for the session. The default value is 0.
+"disabled" (the default) . The session's streams will all be relayed using the OpenTok servers. More than two clients can connect to the session.
 
-=item * C<< multiplexer_switchType => int >>
+"enabled" . The session will attempt to transmit streams directly between clients. If peer-to-peer streaming fails (either when streams are 
+initially published or during the course of a session), the session falls back to using the OpenTok servers for relaying streams. 
+(Peer-to-peer streaming uses UDP, which may be blocked by a firewall.) For a session created with peer-to-peer streaming enabled, 
+only two clients can connect to the session at a time. If an additional client attempts to connect, 
+the TB object on the client dispatches an exception event.
+By removing the server, peer-to-peer streaming decreases latency and improves quality.
 
-An integer defining the type of multiplexer-based switch:
-0 for a timeout-based switch;
-1 for an activity-based switch.
-The default value is 0 (timeout-based).
-
-=item * C<< multiplexer_switchTimeout => int >>
-
-The length, in milliseconds, for the switch in a timeout-based multiplexer.
-The minimum value is 2000 (2 seconds), and the server will change lower values to 2000.
-The default value is 5000 (5 seconds).
-
-Created OpenTok::API::Session object includes a sessionID method, which returns the session ID for the new session.
-Use this session ID in JavaScript on the page that you serve to the client.
-The JavaScript will use this value when calling the connect() method of the Session object (to connect a user to an OpenTok session).
+Note that the properties object previously included settings for multiplexing and server-side echo suppression. 
+However, these features were deleted in OpenTok v0.91.48. (Server-side echo suppression was replaced with the 
+acoustic echo cancellation feature added in OpenTok v0.91.18.)
 
 =back
 
@@ -218,13 +251,6 @@ sub create_session {
 }
 
 # private methods
-
-sub _sign_string {
-    my $self = shift;
-    my ($query_string, $api_secret) =  @_;
-    return hmac_sha1_hex($query_string, $api_secret);    
-}
-
 
 sub _do_request {
     my $self = shift;
@@ -266,7 +292,8 @@ sub _urlencode {
 
 =head1 AUTHOR
 
-Maxim Nikolenko, C<< <root at zbsd.ru> >>
+This version: Dr James Freeman, C<< <james at gp2u.com.au> >>
+Original version: Maxim Nikolenko, C<< <root at zbsd.ru> >>
 
 =head1 BUGS
 
@@ -282,7 +309,7 @@ You can find documentation for this module with the perldoc command.
 
 You can also look for information at:
 
-http://www.tokbox.com/opentok/api/tools/as3/documentation/overview/index.html
+http://www.tokbox.com/opentok
 
 =over 4
 
